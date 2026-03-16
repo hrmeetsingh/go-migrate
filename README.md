@@ -1,8 +1,10 @@
-# migrate
+# go-migrate
 
 A Git-aware database migration tool for PostgreSQL, built in Go.
 
 Migrations are chained by SHA-256 hashes and linked to Git commits, making it possible to detect divergence from your main branch and know exactly how many migrations to revert.
+
+NOTE: This is a vibe-coded project, Opus knows most of the answers, I am still reviewing it and will make amends now.Test it with a throwaway database if you want to try, Im doing the same
 
 ## Install
 
@@ -34,11 +36,11 @@ export DATABASE_URL="postgres://user:pass@localhost:5432/mydb?sslmode=disable"
 
 ## Flags
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--db` | `DATABASE_URL` env | PostgreSQL connection URL |
-| `--dir` | `migrations` | Path to migration SQL files |
-| `--main-branch` | `main` | Branch to compare against for dirty state detection |
+| Flag            | Default            | Description                                         |
+| --------------- | ------------------ | --------------------------------------------------- |
+| `--db`          | `DATABASE_URL` env | PostgreSQL connection URL                           |
+| `--dir`         | `migrations`       | Path to migration SQL files                         |
+| `--main-branch` | `main`             | Branch to compare against for dirty state detection |
 
 ## How It Works
 
@@ -61,6 +63,7 @@ This creates a tamper-evident chain — if any migration file is modified after 
 `migrate status` compares the applied hash chain in the database against the expected chain computed from migration files on the `main` branch (read via go-git, no checkout needed).
 
 If they diverge, it reports:
+
 - Which version the divergence started at
 - How many migrations need to be reverted
 - Which versions from `main` should be applied instead
