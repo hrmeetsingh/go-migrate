@@ -26,9 +26,9 @@ func main() {
 		Long:  "A database migration tool that chains migrations by git commit hash and detects dirty/diverged state.",
 	}
 
-	root.PersistentFlags().StringVar(&dbURL, "db", "", "PostgreSQL connection URL (or set DATABASE_URL)")
-	root.PersistentFlags().StringVar(&migrationsDir, "dir", "migrations", "Path to migration files")
-	root.PersistentFlags().StringVar(&mainBranch, "main-branch", "main", "Name of the main/trunk branch")
+	root.PersistentFlags().StringVar(&dbURL, "db", envOrDefault("DATABASE_URL", ""), "PostgreSQL connection URL (or set DATABASE_URL)")
+	root.PersistentFlags().StringVar(&migrationsDir, "dir", envOrDefault("MIGRATIONS_DIR", "migrations"), "Path to migration files (or set MIGRATIONS_DIR)")
+	root.PersistentFlags().StringVar(&mainBranch, "main-branch", envOrDefault("MAIN_BRANCH", "main"), "Name of the main/trunk branch (or set MAIN_BRANCH)")
 
 	root.AddCommand(upCmd(), downCmd(), statusCmd(), createCmd(), verifyCmd())
 
@@ -37,16 +37,19 @@ func main() {
 	}
 }
 
-func newEngine() (*engine.Engine, error) {
-	connURL := dbURL
-	if connURL == "" {
-		connURL = os.Getenv("DATABASE_URL")
+func envOrDefault(envKey, fallback string) string {
+	if v := os.Getenv(envKey); v != "" {
+		return v
 	}
-	if connURL == "" {
+	return fallback
+}
+
+func newEngine() (*engine.Engine, error) {
+	if dbURL == "" {
 		return nil, fmt.Errorf("database URL required: use --db flag or set DATABASE_URL")
 	}
 
-	db, err := sql.Open("pgx", connURL)
+	db, err := sql.Open("pgx", dbURL)
 	if err != nil {
 		return nil, fmt.Errorf("connect to database: %w", err)
 	}

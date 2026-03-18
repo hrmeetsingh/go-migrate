@@ -36,11 +36,13 @@ export DATABASE_URL="postgres://user:pass@localhost:5432/mydb?sslmode=disable"
 
 ## Flags
 
-| Flag            | Default            | Description                                         |
-| --------------- | ------------------ | --------------------------------------------------- |
-| `--db`          | `DATABASE_URL` env | PostgreSQL connection URL                           |
-| `--dir`         | `migrations`       | Path to migration SQL files                         |
-| `--main-branch` | `main`             | Branch to compare against for dirty state detection |
+| Flag            | Env Var          | Default      | Description                                         |
+| --------------- | ---------------- | ------------ | --------------------------------------------------- |
+| `--db`          | `DATABASE_URL`   | (none)       | PostgreSQL connection URL                           |
+| `--dir`         | `MIGRATIONS_DIR` | `migrations` | Path to migration SQL files                         |
+| `--main-branch` | `MAIN_BRANCH`    | `main`       | Branch to compare against for dirty state detection |
+
+Precedence: CLI flag > environment variable > default value.
 
 ## How It Works
 
