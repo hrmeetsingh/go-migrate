@@ -129,8 +129,15 @@ func statusCmd() *cobra.Command {
 				fmt.Printf("Diverged at:     version %d\n", report.Divergence.DivergentAtVersion)
 				fmt.Printf("Revert count:    %d migrations\n", report.Divergence.RevertCount)
 				fmt.Printf("Versions to revert: %v\n", report.Divergence.DBVersions)
+				if report.Divergence.AppliedFromBranch != "" {
+					fmt.Printf("Applied from:    %s\n", report.Divergence.AppliedFromBranch)
+				}
 				if len(report.Divergence.ExpectedVersions) > 0 {
 					fmt.Printf("Then apply from %s: %v\n", mainBranch, report.Divergence.ExpectedVersions)
+				}
+				if report.Divergence.AppliedFromBranch != "" {
+					fmt.Printf(">> Switch to branch '%s' and run 'migrate down %d' to revert, then switch back and re-run 'migrate up'\n",
+						report.Divergence.AppliedFromBranch, report.Divergence.RevertCount)
 				}
 			} else {
 				fmt.Println("\nState:           clean")
