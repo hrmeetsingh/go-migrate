@@ -51,17 +51,25 @@ func New(cfg Config) (*Engine, error) {
 
 func (e *Engine) Init(ctx context.Context) error {
 	query := `CREATE TABLE IF NOT EXISTS migration_hash_chain (
-		version       BIGINT PRIMARY KEY,
-		git_commit    VARCHAR(40) NOT NULL,
-		parent_hash   VARCHAR(64) NOT NULL,
-		entry_hash    VARCHAR(64) NOT NULL,
-		checksum      VARCHAR(64) NOT NULL,
-		applied_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		version        BIGINT PRIMARY KEY,
+		git_commit     VARCHAR(40) NOT NULL,
+		parent_hash    VARCHAR(64) NOT NULL,
+		entry_hash     VARCHAR(64) NOT NULL,
+		checksum       VARCHAR(64) NOT NULL,
+		applied_branch VARCHAR(255) NOT NULL DEFAULT '',
+		applied_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`
 	_, err := e.db.ExecContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("create hash chain table: %w", err)
 	}
+
+	_, err = e.db.ExecContext(ctx,
+		`ALTER TABLE migration_hash_chain ADD COLUMN IF NOT EXISTS applied_branch VARCHAR(255) NOT NULL DEFAULT ''`)
+	if err != nil {
+		return fmt.Errorf("add applied_branch column: %w", err)
+	}
+
 	return nil
 }
 
@@ -82,15 +90,31 @@ func (e *Engine) Up(ctx context.Context) error {
 		return fmt.Errorf("read local migrations: %w", err)
 	}
 
+	dbChain, err := e.loadDBChain(ctx)
+	if err != nil {
+		return fmt.Errorf("load chain: %w", err)
+	}
+
+	expectedChain := hashchain.BuildExpectedChain(localFiles)
+	if div := hashchain.FindDivergence(dbChain, expectedChain); div != nil {
+		fmt.Println("\n!! DIRTY STATE DETECTED !!")
+		fmt.Printf("Diverged at:     version %d\n", div.DivergentAtVersion)
+		fmt.Printf("Revert count:    %d migrations\n", div.RevertCount)
+		fmt.Printf("Versions to revert: %v\n", div.DBVersions)
+		if div.AppliedFromBranch != "" {
+			fmt.Printf("Applied from:    %s\n", div.AppliedFromBranch)
+			fmt.Printf(">> Switch to branch '%s' and run 'migrate down %d' to revert, then switch back and re-run 'migrate up'\n",
+				div.AppliedFromBranch, div.RevertCount)
+		} else {
+			fmt.Printf(">> Run 'migrate down %d' to revert, then re-run 'migrate up'\n", div.RevertCount)
+		}
+		return fmt.Errorf("cannot apply migrations: hash chain has diverged at version %d", div.DivergentAtVersion)
+	}
+
 	pending := filterPending(localFiles, currentDBVersion)
 	if len(pending) == 0 {
 		fmt.Println("No pending migrations.")
 		return nil
-	}
-
-	dbChain, err := e.loadDBChain(ctx)
-	if err != nil {
-		return fmt.Errorf("load chain: %w", err)
 	}
 
 	parentHash := hashchain.GenesisHash()
@@ -102,6 +126,8 @@ func (e *Engine) Up(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("get HEAD: %w", err)
 	}
+
+	currentBranch, _ := e.git.CurrentBranch()
 
 	if err := goose.SetDialect("postgres"); err != nil {
 		return fmt.Errorf("set dialect: %w", err)
@@ -117,9 +143,9 @@ func (e *Engine) Up(ctx context.Context) error {
 		entryHash := hashchain.ComputeEntryHash(parentHash, checksum, mf.Version)
 
 		_, err := e.db.ExecContext(ctx,
-			`INSERT INTO migration_hash_chain (version, git_commit, parent_hash, entry_hash, checksum, applied_at)
-			 VALUES ($1, $2, $3, $4, $5, $6)`,
-			mf.Version, commitHash, parentHash, entryHash, checksum, time.Now(),
+			`INSERT INTO migration_hash_chain (version, git_commit, parent_hash, entry_hash, checksum, applied_branch, applied_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			mf.Version, commitHash, parentHash, entryHash, checksum, currentBranch, time.Now(),
 		)
 		if err != nil {
 			return fmt.Errorf("record chain entry for version %d: %w", mf.Version, err)
@@ -269,7 +295,7 @@ func (e *Engine) Create(name string) (string, error) {
 
 func (e *Engine) loadDBChain(ctx context.Context) ([]hashchain.Entry, error) {
 	rows, err := e.db.QueryContext(ctx,
-		`SELECT version, git_commit, parent_hash, entry_hash, checksum, applied_at
+		`SELECT version, git_commit, parent_hash, entry_hash, checksum, applied_branch, applied_at
 		 FROM migration_hash_chain ORDER BY version ASC`)
 	if err != nil {
 		return nil, err
@@ -279,7 +305,7 @@ func (e *Engine) loadDBChain(ctx context.Context) ([]hashchain.Entry, error) {
 	var chain []hashchain.Entry
 	for rows.Next() {
 		var e hashchain.Entry
-		if err := rows.Scan(&e.Version, &e.GitCommitHash, &e.ParentHash, &e.EntryHash, &e.Checksum, &e.AppliedAt); err != nil {
+		if err := rows.Scan(&e.Version, &e.GitCommitHash, &e.ParentHash, &e.EntryHash, &e.Checksum, &e.AppliedBranch, &e.AppliedAt); err != nil {
 			return nil, err
 		}
 		chain = append(chain, e)

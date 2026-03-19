@@ -12,6 +12,7 @@ type Entry struct {
 	ParentHash    string
 	EntryHash     string
 	Checksum      string
+	AppliedBranch string
 	AppliedAt     time.Time
 }
 
@@ -63,6 +64,7 @@ type Divergence struct {
 	RevertCount        int
 	DBVersions         []int64
 	ExpectedVersions   []int64
+	AppliedFromBranch  string
 }
 
 // FindDivergence compares the applied DB chain against an expected chain
@@ -90,6 +92,7 @@ func FindDivergence(dbChain, expectedChain []Entry) *Divergence {
 				RevertCount:        revertCount,
 				DBVersions:         dbVersions,
 				ExpectedVersions:   expectedVersions,
+				AppliedFromBranch:  dbChain[i].AppliedBranch,
 			}
 		}
 	}
@@ -104,6 +107,7 @@ func FindDivergence(dbChain, expectedChain []Entry) *Divergence {
 			DivergentAtVersion: dbChain[len(expectedChain)].Version,
 			RevertCount:        revertCount,
 			DBVersions:         dbVersions,
+			AppliedFromBranch:  dbChain[len(expectedChain)].AppliedBranch,
 		}
 	}
 
