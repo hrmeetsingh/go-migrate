@@ -73,37 +73,56 @@ Hash chain is valid. No tampering detected.
 
 When two developers create migrations on separate feature branches, merging one branch first leaves the other developer's database out of sync. Traditional tools will tell you "N pending," but they can't tell you that your applied history has diverged from the trunk.
 
-Go-migrate reads migration files directly from the `main` branch using go-git (no checkout needed) and compares them against the applied chain in the database:
+Go-migrate reads migration files directly from the `main` branch using go-git (no checkout needed) and compares them against the applied chain in the database. It also records which branch each migration was applied from, so when divergence is detected you know exactly where to go to fix it.
+
+`migrate status` detects and reports the divergence:
 
 ```bash
 $ ./bin/migrate status
-Branch:          feature/add-payments
-HEAD:            a1b2c3d
+Branch:          cart_feature
+HEAD:            b4c5d6e
 DB version:      5
 Applied:         5
 Pending:         0
 
 !! DIRTY STATE DETECTED !!
-Diverged at:     version 4
-Revert count:    2 migrations
-Versions to revert: [5 4]
-Then apply from main: [4 5 6]
+Diverged at:     version 5
+Revert count:    1 migrations
+Versions to revert: [5]
+Applied from:    notifications_feature
+Then apply from main: [5]
+>> Switch to branch 'notifications_feature' and run 'migrate down 1' to revert, then switch back and re-run 'migrate up'
 ```
 
-This tells you exactly what to do: revert 2 migrations, then apply 3 from `main`.
+`migrate up` also catches this before applying anything:
+
+```bash
+$ ./bin/migrate up
+
+!! DIRTY STATE DETECTED !!
+Diverged at:     version 5
+Revert count:    1 migrations
+Versions to revert: [5]
+Applied from:    notifications_feature
+>> Switch to branch 'notifications_feature' and run 'migrate down 1' to revert, then switch back and re-run 'migrate up'
+Error: cannot apply migrations: hash chain has diverged at version 5
+```
+
+Instead of silently saying "No pending migrations," the tool blocks the apply and tells you exactly which branch to switch to and what command to run.
 
 ### Git-Commit-Stamped Audit Trail
 
-Every applied migration records the git commit it was applied from in the `migration_hash_chain` table:
+Every applied migration records the git commit and branch it was applied from in the `migration_hash_chain` table:
 
 ```
-version | git_commit                               | parent_hash    | entry_hash     | checksum       | applied_at
---------+------------------------------------------+----------------+----------------+----------------+------------------------
-      1 | a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2 | 000000...      | 8f3a21...      | c4e9b1...      | 2026-03-17 10:30:00+00
-      2 | a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2 | 8f3a21...      | 7d2e44...      | b3f8a2...      | 2026-03-17 10:30:01+00
+version | git_commit                               | parent_hash | entry_hash | checksum  | applied_branch         | applied_at
+--------+------------------------------------------+-------------+------------+-----------+------------------------+------------------------
+      1 | a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2 | 000000...   | 8f3a21...  | c4e9b1... | main                   | 2026-03-17 10:30:00+00
+      2 | a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2 | 8f3a21...   | 7d2e44...  | b3f8a2... | main                   | 2026-03-17 10:30:01+00
+      3 | f7e8d9c0b1a2f7e8d9c0b1a2f7e8d9c0b1a2f7e8 | 7d2e44...   | 5c1b33...  | a2d7f0... | notifications_feature  | 2026-03-18 14:20:00+00
 ```
 
-During a production incident, you can trace any schema change back to the exact commit that introduced it — something traditional tools cannot do since they only record version numbers and timestamps.
+During a production incident, you can trace any schema change back to the exact commit and branch that introduced it — something traditional tools cannot do since they only record version numbers and timestamps.
 
 New migrations are also stamped with the current git commit when created:
 
@@ -128,24 +147,28 @@ Created: migrations/003_add_products_table.sql
 Each applied migration is recorded in a `migration_hash_chain` table:
 
 ```
-version | git_commit | parent_hash | entry_hash | checksum | applied_at
+version | git_commit | parent_hash | entry_hash | checksum | applied_branch | applied_at
 ```
 
 - `checksum` = SHA-256 of the migration file content
 - `entry_hash` = SHA-256(parent_hash + checksum + version)
 - `parent_hash` = the previous entry's `entry_hash` (genesis for the first)
+- `applied_branch` = the git branch that was checked out when the migration was applied
 
 This creates a tamper-evident chain — if any migration file is modified after being applied, `migrate verify` will detect it.
 
 ### Dirty State Detection
 
-`migrate status` compares the applied hash chain in the database against the expected chain computed from migration files on the `main` branch (read via go-git, no checkout needed).
+Both `migrate status` and `migrate up` compare the applied hash chain in the database against the expected chain computed from local migration files (and from the `main` branch via go-git, no checkout needed).
 
 If they diverge, it reports:
 
 - Which version the divergence started at
 - How many migrations need to be reverted
+- Which branch those migrations were applied from
 - Which versions from `main` should be applied instead
+
+`migrate up` will refuse to apply new migrations if a divergence is detected, and will direct you to the correct branch to revert from first.
 
 ## Migration Files
 
