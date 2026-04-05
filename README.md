@@ -15,7 +15,7 @@ The CLI layer exposes five commands that all route through a central Engine. The
 **Option 1:** Install directly using `go install`:
 
 ```bash
-go install github.com/harmeetsingh/go-migrate/cmd/migrate@latest
+go install github.com/hrmeetsingh/go-migrate/cmd/migrate@latest
 ```
 
 This places the `migrate` binary in your `$GOPATH/bin` (or `$HOME/go/bin` by default).
