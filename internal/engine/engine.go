@@ -13,8 +13,8 @@ import (
 
 	"github.com/pressly/goose/v3"
 
-	"github.com/harmeetsingh/go-migrate/internal/gitstate"
-	"github.com/harmeetsingh/go-migrate/internal/hashchain"
+	"github.com/hrmeetsingh/go-migrate/internal/gitstate"
+	"github.com/hrmeetsingh/go-migrate/internal/hashchain"
 )
 
 type Engine struct {

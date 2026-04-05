@@ -10,7 +10,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/spf13/cobra"
 
-	"github.com/harmeetsingh/go-migrate/internal/engine"
+	"github.com/hrmeetsingh/go-migrate/internal/engine"
 )
 
 var (

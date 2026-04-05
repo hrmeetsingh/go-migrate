@@ -12,7 +12,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 
-	"github.com/harmeetsingh/go-migrate/internal/hashchain"
+	"github.com/hrmeetsingh/go-migrate/internal/hashchain"
 )
 
 type GitState struct {
