@@ -3,7 +3,7 @@ package hashchain_test
 import (
 	"testing"
 
-	"github.com/harmeetsingh/go-migrate/internal/hashchain"
+	"github.com/hrmeetsingh/go-migrate/internal/hashchain"
 )
 
 func TestComputeChecksum(t *testing.T) {
