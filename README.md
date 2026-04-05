@@ -4,6 +4,12 @@ A Git-aware database migration tool for PostgreSQL, built in Go.
 
 Migrations are chained by SHA-256 hashes and linked to Git commits, making it possible to detect divergence from your main branch and know exactly how many migrations to revert.
 
+## Architecture
+
+The CLI layer exposes five commands that all route through a central Engine. The engine coordinates between two internal modules — `hashchain` for cryptographic integrity and `gitstate` for reading git history — along with PostgreSQL and local migration files.
+
+![Architecture](images/01_architecture.png)
+
 ## Install
 
 ```bash
@@ -48,13 +54,13 @@ Precedence: CLI flag > environment variable > default value.
 
 Traditional migration tools track which migrations have been applied, and some store individual file checksums. Go-migrate goes further by building a blockchain-style linked chain where each entry depends on every previous one.
 
-Each migration's `entry_hash` is computed as:
+Each migration's `entry_hash` is computed from its parent's hash, its own file checksum, and its version number. This means tampering with *any* earlier migration breaks the chain for everything after it — not just that one file. Even reordering or inserting migrations would be caught.
 
-```
-entry_hash = SHA-256(parent_hash + checksum + version)
-```
+![Hash Chain Construction](images/04_hash_chain.png)
 
-This means tampering with *any* earlier migration breaks the chain for everything after it — not just that one file. Even reordering or inserting migrations would be caught.
+The `verify` command walks the stored chain and recomputes every hash from scratch. If any file was modified after being applied, the recomputed hash won't match the stored one.
+
+![Tamper Detection Flow](images/06_migrate_verify.png)
 
 ```bash
 $ ./bin/migrate verify
@@ -75,7 +81,13 @@ When two developers create migrations on separate feature branches, merging one 
 
 Go-migrate reads migration files directly from the `main` branch using go-git (no checkout needed) and compares them against the applied chain in the database. It also records which branch each migration was applied from, so when divergence is detected you know exactly where to go to fix it.
 
+The following diagram walks through a realistic scenario: two feature branches both create version 5, leading to a divergence that go-migrate detects and guides you through resolving.
+
+![Branch Divergence Scenario](images/05_branch_divergence.png)
+
 `migrate status` detects and reports the divergence:
+
+![Dirty State Detection](images/03_migrate_status.png)
 
 ```bash
 $ ./bin/migrate status
@@ -95,6 +107,8 @@ Then apply from main: [5]
 ```
 
 `migrate up` also catches this before applying anything:
+
+![Migrate Up Flow](images/02_migrate_up.png)
 
 ```bash
 $ ./bin/migrate up
