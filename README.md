@@ -93,7 +93,15 @@ When two developers create migrations on separate feature branches, merging one 
 
 Go-migrate reads migration files directly from the `main` branch using go-git (no checkout needed) and compares them against the applied chain in the database. It also records which branch each migration was applied from, so when divergence is detected you know exactly where to go to fix it.
 
-The following diagram walks through a realistic scenario: two feature branches both create version 5, leading to a divergence that go-migrate detects and guides you through resolving.
+Consider a real example from this project: migrations v1 through v4 are shared on `main` (`create_users`, `create_orders`, `add_unique_constraint`, `create_payments`). Three branches then diverge, each creating their own version 5 with completely different SQL — `offers_feature` adds an offers table, `notifications_feature` adds a notifications table, and `main` later adds a cart table. Same version number, different content, different SHA-256 checksums.
+
+![Branch Divergence — Migration Conflict](images/07_branch_divergence_migrations.png)
+
+When a developer applies v5 from one branch and then switches to another, go-migrate detects the checksum mismatch, identifies which branch the conflicting migration came from, and tells the developer exactly how to resolve it.
+
+![What Happens When Branches Diverge](images/08_divergence_narrative.png)
+
+Here is the detailed sequence of events when this happens across branches:
 
 ![Branch Divergence Scenario](images/05_branch_divergence.png)
 
