@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/spf13/cobra"
@@ -44,6 +46,14 @@ func envOrDefault(envKey, fallback string) string {
 	return fallback
 }
 
+func stdinConfirm(prompt string) bool {
+	fmt.Print(prompt)
+	reader := bufio.NewReader(os.Stdin)
+	answer, _ := reader.ReadString('\n')
+	answer = strings.TrimSpace(strings.ToLower(answer))
+	return answer == "y" || answer == "yes"
+}
+
 func newEngine() (*engine.Engine, error) {
 	if dbURL == "" {
 		return nil, fmt.Errorf("database URL required: use --db flag or set DATABASE_URL")
@@ -64,6 +74,7 @@ func newEngine() (*engine.Engine, error) {
 		RepoPath:      cwd,
 		MigrationsDir: migrationsDir,
 		MainBranch:    mainBranch,
+		ConfirmFunc:   stdinConfirm,
 	})
 }
 

@@ -2,11 +2,11 @@
 
 A Git-aware database migration tool for PostgreSQL, built in Go.
 
-Migrations are chained by SHA-256 hashes and linked to Git commits, making it possible to detect divergence from your main branch and know exactly how many migrations to revert.
+Migrations are chained by SHA-256 hashes and linked to Git commits, making it possible to detect divergence from your main branch, classify conflicts as soft or hard, and auto-resequence independent migrations.
 
 ## Architecture
 
-The CLI layer exposes five commands that all route through a central Engine. The engine coordinates between two internal modules — `hashchain` for cryptographic integrity and `gitstate` for reading git history — along with PostgreSQL and local migration files.
+The CLI layer exposes five commands that all route through a central Engine. The engine coordinates between three internal modules — `hashchain` for cryptographic integrity, `gitstate` for reading git history, and `sqlparse` for SQL conflict analysis — along with PostgreSQL and local migration files.
 
 ![Architecture](images/01_architecture.png)
 
@@ -97,10 +97,6 @@ Consider a real example from this project: migrations v1 through v4 are shared o
 
 ![Branch Divergence — Migration Conflict](images/07_branch_divergence_migrations.png)
 
-When a developer applies v5 from one branch and then switches to another, go-migrate detects the checksum mismatch, identifies which branch the conflicting migration came from, and tells the developer exactly how to resolve it.
-
-![What Happens When Branches Diverge](images/08_divergence_narrative.png)
-
 Here is the detailed sequence of events when this happens across branches:
 
 ![Branch Divergence Scenario](images/05_branch_divergence.png)
@@ -126,23 +122,65 @@ Then apply from main: [5]
 >> Switch to branch 'notifications_feature' and run 'migrate down 1' to revert, then switch back and re-run 'migrate up'
 ```
 
-`migrate up` also catches this before applying anything:
+### Smart Conflict Classification and Auto-Resequencing
 
-![Migrate Up Flow](images/02_migrate_up.png)
+Not all version collisions are equal. When a branch creates a **new independent table** that doesn't exist in main, the conflict is purely about the version number — the migration itself is safe to apply after renumbering. But when a branch **modifies tables defined in main** (ALTER, DROP, DML), that's a real schema conflict requiring manual intervention.
+
+Go-migrate's `migrate up` command now performs **version-aware reconciliation** instead of a strict positional hash comparison. When it detects a version collision, it:
+
+1. Parses the SQL in the colliding migration to extract operations (CREATE TABLE, ALTER TABLE, etc.)
+2. Loads the entity catalog from the main branch (all tables created by main's migrations)
+3. Classifies the conflict as **soft** or **hard**
+
+![Conflict Classification](images/10_conflict_classification.png)
+
+**Soft conflicts** — the migration only creates new entities not defined in main, or creates additive structures like indexes. The tool suggests resequencing the file to the next available version and asks for confirmation:
+
+![Soft Conflict — Auto-Resequencing](images/11_soft_conflict_resequencing.png)
 
 ```bash
 $ ./bin/migrate up
 
-!! DIRTY STATE DETECTED !!
-Diverged at:     version 5
-Revert count:    1 migrations
-Versions to revert: [5]
-Applied from:    notifications_feature
->> Switch to branch 'notifications_feature' and run 'migrate down 1' to revert, then switch back and re-run 'migrate up'
-Error: cannot apply migrations: hash chain has diverged at version 5
+Reconciliation found 1 version collision(s):
+
+  Version 003: LOCAL CREATE TABLE "notifications" (003_create_notifications.sql)
+               DB has different migration applied from branch "feature-payments"
+               Conflict: SOFT (independent new entity)
+
+Suggested resequencing:
+  003_create_notifications.sql  ->  004_create_notifications.sql
+
+Proceed with resequencing? [y/N]: y
+  Renamed: 003_create_notifications.sql -> 004_create_notifications.sql
+
+Resequenced 1 file(s).
+
+Note: DB contains 1 migration(s) from other branches (adopted)
+Applied migration 4 (hash: a1b2c3d4e5f6..)
 ```
 
-Instead of silently saying "No pending migrations," the tool blocks the apply and tells you exactly which branch to switch to and what command to run.
+**Hard conflicts** — the migration alters, drops, or performs DML on entities defined in main's migrations. These cannot be auto-resolved and require manual intervention:
+
+![Hard Conflict — Manual Resolution](images/12_hard_conflict.png)
+
+```bash
+$ ./bin/migrate up
+
+!! HARD CONFLICT DETECTED !!
+
+  Version 003: LOCAL ALTER TABLE "users" (003_add_email_to_users.sql)
+               DB has different migration applied from branch "feature-payments"
+               Conflict: HARD (modifies entities defined in main)
+
+Cannot auto-resolve. Manual steps:
+  1. Switch to branch 'feature-payments' and run 'migrate down 1' to revert
+  2. Switch back and re-run 'migrate up'
+Error: cannot apply migrations: hard conflict at version 3
+```
+
+The full `migrate up` flow, including the reconciliation and resequencing steps:
+
+![Migrate Up — Reconciliation Flow](images/02_migrate_up.png)
 
 ### Git-Commit-Stamped Audit Trail
 
@@ -191,9 +229,20 @@ version | git_commit | parent_hash | entry_hash | checksum | applied_branch | ap
 
 This creates a tamper-evident chain — if any migration file is modified after being applied, `migrate verify` will detect it.
 
+### Version-Aware Reconciliation
+
+When `migrate up` runs, it performs a version-aware comparison between local files and the DB chain:
+
+1. **Verified** — DB version exists in local files with matching checksum. These are already applied and consistent.
+2. **Foreign** — DB version does not exist in local files. This was applied from another branch and is "adopted" into the chain.
+3. **Pending** — Local file version does not exist in DB. These will be applied.
+4. **Collision** — DB version exists in local files but with a different checksum. These are classified as soft or hard.
+
+For collisions, the SQL in the local migration is parsed and compared against the entity catalog from the main branch to determine whether it can be safely resequenced or requires manual resolution.
+
 ### Dirty State Detection
 
-Both `migrate status` and `migrate up` compare the applied hash chain in the database against the expected chain computed from local migration files (and from the `main` branch via go-git, no checkout needed).
+`migrate status` compares the applied hash chain in the database against the expected chain computed from the `main` branch's migration files (read via go-git, no checkout needed).
 
 If they diverge, it reports:
 
@@ -202,7 +251,18 @@ If they diverge, it reports:
 - Which branch those migrations were applied from
 - Which versions from `main` should be applied instead
 
-`migrate up` will refuse to apply new migrations if a divergence is detected, and will direct you to the correct branch to revert from first.
+### Conflict Classification Rules
+
+| SQL Operation | Entity in main? | Classification |
+|---|---|---|
+| `CREATE TABLE new_table` | No | Soft |
+| `CREATE TABLE existing_table` | Yes | Hard |
+| `ALTER TABLE any_table` | Yes | Hard |
+| `DROP TABLE any_table` | Yes | Hard |
+| `CREATE INDEX ... ON any_table` | Either | Soft |
+| `CREATE SEQUENCE` | -- | Soft |
+| `DROP INDEX`, `DROP SEQUENCE` | -- | Hard |
+| `INSERT/UPDATE/DELETE` | Yes | Hard |
 
 ## Migration Files
 

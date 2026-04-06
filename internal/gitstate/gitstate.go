@@ -98,8 +98,9 @@ func (g *GitState) MigrationFilesAtRef(refName, migrationsDir string) ([]hashcha
 		}
 
 		files = append(files, hashchain.MigrationFile{
-			Version: version,
-			Content: content,
+			Version:  version,
+			Filename: entry.Name,
+			Content:  content,
 		})
 	}
 
