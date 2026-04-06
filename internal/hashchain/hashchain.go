@@ -37,6 +37,7 @@ func GenesisHash() string {
 // migration file contents ordered by version.
 type MigrationFile struct {
 	Version  int64
+	Filename string
 	Content  []byte
 }
 

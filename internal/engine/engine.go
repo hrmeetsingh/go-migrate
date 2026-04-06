@@ -15,6 +15,7 @@ import (
 
 	"github.com/hrmeetsingh/go-migrate/internal/gitstate"
 	"github.com/hrmeetsingh/go-migrate/internal/hashchain"
+	"github.com/hrmeetsingh/go-migrate/internal/sqlparse"
 )
 
 type Engine struct {
@@ -22,6 +23,7 @@ type Engine struct {
 	git           *gitstate.GitState
 	migrationsDir string
 	mainBranch    string
+	confirmFunc   func(prompt string) bool
 }
 
 type Config struct {
@@ -29,6 +31,33 @@ type Config struct {
 	RepoPath      string
 	MigrationsDir string
 	MainBranch    string
+	ConfirmFunc   func(prompt string) bool
+}
+
+type ReconcileResult struct {
+	Verified   []int64
+	Foreign    []ForeignEntry
+	Pending    []hashchain.MigrationFile
+	Collisions []VersionCollision
+}
+
+type ForeignEntry struct {
+	Version       int64
+	AppliedBranch string
+}
+
+type VersionCollision struct {
+	Version      int64
+	LocalFile    hashchain.MigrationFile
+	DBEntry      hashchain.Entry
+	ConflictKind sqlparse.ConflictKind
+}
+
+type ResequenceAction struct {
+	OldFilename string
+	NewFilename string
+	OldVersion  int64
+	NewVersion  int64
 }
 
 func New(cfg Config) (*Engine, error) {
@@ -46,6 +75,7 @@ func New(cfg Config) (*Engine, error) {
 		git:           gs,
 		migrationsDir: cfg.MigrationsDir,
 		mainBranch:    cfg.MainBranch,
+		confirmFunc:   cfg.ConfirmFunc,
 	}, nil
 }
 
@@ -80,11 +110,6 @@ func (e *Engine) Up(ctx context.Context) error {
 
 	goose.SetDialect("postgres")
 
-	currentDBVersion, err := goose.GetDBVersionContext(ctx, e.db)
-	if err != nil {
-		currentDBVersion = 0
-	}
-
 	localFiles, err := e.readLocalMigrationFiles()
 	if err != nil {
 		return fmt.Errorf("read local migrations: %w", err)
@@ -95,23 +120,58 @@ func (e *Engine) Up(ctx context.Context) error {
 		return fmt.Errorf("load chain: %w", err)
 	}
 
-	expectedChain := hashchain.BuildExpectedChain(localFiles)
-	if div := hashchain.FindDivergence(dbChain, expectedChain); div != nil {
-		fmt.Println("\n!! DIRTY STATE DETECTED !!")
-		fmt.Printf("Diverged at:     version %d\n", div.DivergentAtVersion)
-		fmt.Printf("Revert count:    %d migrations\n", div.RevertCount)
-		fmt.Printf("Versions to revert: %v\n", div.DBVersions)
-		if div.AppliedFromBranch != "" {
-			fmt.Printf("Applied from:    %s\n", div.AppliedFromBranch)
-			fmt.Printf(">> Switch to branch '%s' and run 'migrate down %d' to revert, then switch back and re-run 'migrate up'\n",
-				div.AppliedFromBranch, div.RevertCount)
-		} else {
-			fmt.Printf(">> Run 'migrate down %d' to revert, then re-run 'migrate up'\n", div.RevertCount)
+	result := e.reconcile(localFiles, dbChain)
+
+	if len(result.Collisions) > 0 {
+		if err := e.classifyCollisions(result); err != nil {
+			return err
 		}
-		return fmt.Errorf("cannot apply migrations: hash chain has diverged at version %d", div.DivergentAtVersion)
+
+		var hardConflicts, softConflicts []VersionCollision
+		for _, c := range result.Collisions {
+			if c.ConflictKind == sqlparse.HardConflict {
+				hardConflicts = append(hardConflicts, c)
+			} else {
+				softConflicts = append(softConflicts, c)
+			}
+		}
+
+		if len(hardConflicts) > 0 {
+			return e.reportHardConflicts(hardConflicts, dbChain)
+		}
+
+		var dbMaxVersion int64
+		if len(dbChain) > 0 {
+			dbMaxVersion = dbChain[len(dbChain)-1].Version
+		}
+		actions := e.buildResequencePlan(localFiles, softConflicts, dbMaxVersion)
+
+		e.printSoftConflictSummary(softConflicts, actions)
+
+		if e.confirmFunc == nil || !e.confirmFunc("Proceed with resequencing? [y/N]: ") {
+			return fmt.Errorf("resequencing declined; resolve version conflicts manually")
+		}
+
+		if err := e.applyResequence(actions); err != nil {
+			return err
+		}
+		fmt.Printf("\nResequenced %d file(s).\n", len(actions))
+
+		localFiles, err = e.readLocalMigrationFiles()
+		if err != nil {
+			return fmt.Errorf("re-read local migrations: %w", err)
+		}
+		result = e.reconcile(localFiles, dbChain)
+		if len(result.Collisions) > 0 {
+			return fmt.Errorf("unexpected collisions remain after resequencing")
+		}
 	}
 
-	pending := filterPending(localFiles, currentDBVersion)
+	if len(result.Foreign) > 0 {
+		fmt.Printf("\nNote: DB contains %d migration(s) from other branches (adopted)\n", len(result.Foreign))
+	}
+
+	pending := result.Pending
 	if len(pending) == 0 {
 		fmt.Println("No pending migrations.")
 		return nil
@@ -156,6 +216,184 @@ func (e *Engine) Up(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// reconcile performs a version-aware comparison between local migration
+// files and the DB chain, identifying verified matches, foreign entries
+// (from other branches), pending files, and version collisions.
+func (e *Engine) reconcile(localFiles []hashchain.MigrationFile, dbChain []hashchain.Entry) *ReconcileResult {
+	result := &ReconcileResult{}
+	localMap := make(map[int64]hashchain.MigrationFile)
+	for _, f := range localFiles {
+		localMap[f.Version] = f
+	}
+
+	for _, dbEntry := range dbChain {
+		if localFile, exists := localMap[dbEntry.Version]; exists {
+			localChecksum := hashchain.ComputeChecksum(localFile.Content)
+			if localChecksum == dbEntry.Checksum {
+				result.Verified = append(result.Verified, dbEntry.Version)
+			} else {
+				result.Collisions = append(result.Collisions, VersionCollision{
+					Version:   dbEntry.Version,
+					LocalFile: localFile,
+					DBEntry:   dbEntry,
+				})
+			}
+			delete(localMap, dbEntry.Version)
+		} else {
+			result.Foreign = append(result.Foreign, ForeignEntry{
+				Version:       dbEntry.Version,
+				AppliedBranch: dbEntry.AppliedBranch,
+			})
+		}
+	}
+
+	for _, f := range localFiles {
+		if _, ok := localMap[f.Version]; ok {
+			result.Pending = append(result.Pending, f)
+		}
+	}
+	sort.Slice(result.Pending, func(i, j int) bool {
+		return result.Pending[i].Version < result.Pending[j].Version
+	})
+
+	return result
+}
+
+func (e *Engine) classifyCollisions(result *ReconcileResult) error {
+	mainFiles, err := e.git.MigrationFilesAtRef(e.mainBranch, e.migrationsDir)
+	if err != nil {
+		for i := range result.Collisions {
+			result.Collisions[i].ConflictKind = sqlparse.HardConflict
+		}
+		return nil
+	}
+
+	mainEntities := sqlparse.ExtractDefinedEntities(mainFiles)
+
+	for i := range result.Collisions {
+		ops := sqlparse.ParseOperations(result.Collisions[i].LocalFile.Content)
+		result.Collisions[i].ConflictKind = sqlparse.ClassifyConflict(ops, mainEntities)
+	}
+	return nil
+}
+
+func (e *Engine) buildResequencePlan(localFiles []hashchain.MigrationFile, collisions []VersionCollision, dbMaxVersion int64) []ResequenceAction {
+	earliestCollision := collisions[0].Version
+	for _, c := range collisions[1:] {
+		if c.Version < earliestCollision {
+			earliestCollision = c.Version
+		}
+	}
+
+	var toShift []hashchain.MigrationFile
+	for _, f := range localFiles {
+		if f.Version >= earliestCollision {
+			toShift = append(toShift, f)
+		}
+	}
+
+	nextVersion := dbMaxVersion + 1
+	var actions []ResequenceAction
+	for _, f := range toShift {
+		newFilename := fmt.Sprintf("%03d_%s", nextVersion, filenameDescPart(f.Filename))
+		actions = append(actions, ResequenceAction{
+			OldFilename: f.Filename,
+			NewFilename: newFilename,
+			OldVersion:  f.Version,
+			NewVersion:  nextVersion,
+		})
+		nextVersion++
+	}
+	return actions
+}
+
+func (e *Engine) applyResequence(actions []ResequenceAction) error {
+	// Rename in reverse order to avoid overwriting files when shifting
+	// forward (e.g. 003→004 before 004→005 would clobber the original 004).
+	for i := len(actions) - 1; i >= 0; i-- {
+		a := actions[i]
+		oldPath := filepath.Join(e.migrationsDir, a.OldFilename)
+		newPath := filepath.Join(e.migrationsDir, a.NewFilename)
+		if err := os.Rename(oldPath, newPath); err != nil {
+			return fmt.Errorf("rename %s -> %s: %w", a.OldFilename, a.NewFilename, err)
+		}
+	}
+	for _, a := range actions {
+		fmt.Printf("  Renamed: %s -> %s\n", a.OldFilename, a.NewFilename)
+	}
+	return nil
+}
+
+func (e *Engine) reportHardConflicts(conflicts []VersionCollision, dbChain []hashchain.Entry) error {
+	fmt.Println("\n!! HARD CONFLICT DETECTED !!")
+	for _, c := range conflicts {
+		ops := sqlparse.ParseOperations(c.LocalFile.Content)
+		var affected []string
+		for _, op := range ops {
+			affected = append(affected, fmt.Sprintf("%s %q", op.Kind, op.EntityName))
+		}
+		fmt.Printf("\n  Version %03d: LOCAL %s (%s)\n", c.Version, strings.Join(affected, ", "), c.LocalFile.Filename)
+		if c.DBEntry.AppliedBranch != "" {
+			fmt.Printf("               DB has different migration applied from branch %q\n", c.DBEntry.AppliedBranch)
+		} else {
+			fmt.Printf("               DB has different migration with same version\n")
+		}
+		fmt.Printf("               Conflict: HARD (modifies entities defined in main)\n")
+	}
+
+	earliestVersion := conflicts[0].Version
+	revertCount := 0
+	for _, entry := range dbChain {
+		if entry.Version >= earliestVersion {
+			revertCount++
+		}
+	}
+
+	branch := conflicts[0].DBEntry.AppliedBranch
+	fmt.Println("\nCannot auto-resolve. Manual steps:")
+	if branch != "" {
+		fmt.Printf("  1. Switch to branch '%s' and run 'migrate down %d' to revert\n", branch, revertCount)
+		fmt.Println("  2. Switch back and re-run 'migrate up'")
+	} else {
+		fmt.Printf("  1. Run 'migrate down %d' to revert the conflicting migrations\n", revertCount)
+		fmt.Println("  2. Re-run 'migrate up'")
+	}
+
+	return fmt.Errorf("cannot apply migrations: hard conflict at version %d", earliestVersion)
+}
+
+func (e *Engine) printSoftConflictSummary(conflicts []VersionCollision, actions []ResequenceAction) {
+	fmt.Printf("\nReconciliation found %d version collision(s):\n", len(conflicts))
+	for _, c := range conflicts {
+		ops := sqlparse.ParseOperations(c.LocalFile.Content)
+		var desc []string
+		for _, op := range ops {
+			desc = append(desc, fmt.Sprintf("%s %q", op.Kind, op.EntityName))
+		}
+		fmt.Printf("\n  Version %03d: LOCAL %s (%s)\n", c.Version, strings.Join(desc, ", "), c.LocalFile.Filename)
+		if c.DBEntry.AppliedBranch != "" {
+			fmt.Printf("               DB has different migration applied from branch %q\n", c.DBEntry.AppliedBranch)
+		} else {
+			fmt.Printf("               DB has different migration with same version\n")
+		}
+		fmt.Printf("               Conflict: SOFT (independent new entity)\n")
+	}
+
+	fmt.Println("\nSuggested resequencing:")
+	for _, a := range actions {
+		fmt.Printf("  %s  ->  %s\n", a.OldFilename, a.NewFilename)
+	}
+	fmt.Println()
+}
+
+func filenameDescPart(filename string) string {
+	parts := strings.SplitN(filename, "_", 2)
+	if len(parts) < 2 {
+		return filename
+	}
+	return parts[1]
 }
 
 func (e *Engine) Down(ctx context.Context, steps int) error {
@@ -333,8 +571,9 @@ func (e *Engine) readLocalMigrationFiles() ([]hashchain.MigrationFile, error) {
 			return nil, fmt.Errorf("read %s: %w", entry.Name(), err)
 		}
 		files = append(files, hashchain.MigrationFile{
-			Version: version,
-			Content: content,
+			Version:  version,
+			Filename: entry.Name(),
+			Content:  content,
 		})
 	}
 
